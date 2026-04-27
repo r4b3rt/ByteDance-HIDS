@@ -1,7 +1,16 @@
-PREFIX ?= /etc/elkeid/plugin/RASP
+PREFIX ?= /etc/elkeid/plugin/rasp
 STATIC ?= "FALSE"
+VERSION ?= 1.0.0.0
+OUTPUT ?= output
+DEBUG_SYMBOLS ?= debug
+LIB_OUTPUT ?= $(OUTPUT)/lib-$(VERSION)
+VCPKG_OVERLAY_PORTS ?= $(abspath overlay-ports)
 
-.PHONY: help
+.PHONY: all help install clean check_benchmark set-version agent-plugin nsenter pangolin jattach  JVMAgent JVMProbe python-probe python-loader go-probe go-probe-ebpf node-probe php-probe librasp rasp-server NSMount
+
+all: rasp-linux-default-x86_64-$(VERSION).tar.gz rasp-linux-default-x86_64-$(VERSION)-debug.tar.gz SHA256SUMS
+
+
 help:
 	@echo "Usage : make <commands>"
 	@echo "available commands :"
@@ -11,134 +20,461 @@ help:
 	@echo "---"
 	@grep -hE '##' Makefile  | grep -v grep | sed -e 's/\\$$//' | sed -e 's/##/,/'  | sed -e 's/:.*,/ ,/' | column -t -c2 -s,
 
-rasp: ## build elkeid_rasp bin file
-	mkdir -p output
+
+install: | $(OUTPUT)
+	mkdir -p $(PREFIX)
+	cp -r $(OUTPUT)/* $(PREFIX)
+
+
+clean:
+	rm -rf $(OUTPUT) $(DEBUG_SYMBOLS) rasp-linux-default-x86_64-$(VERSION).tar.gz rasp-linux-default-x86_64-$(VERSION)-debug.tar.gz SHA256SUMS
+
+
+rasp-linux-default-x86_64-$(VERSION).tar.gz: rasp-linux-default-x86_64-$(VERSION)-debug.tar.gz
+	cd $(OUTPUT) && tar -czvf ../$@ ./*
+
+
+rasp-linux-default-x86_64-$(VERSION)-debug.tar.gz: | $(DEBUG_SYMBOLS)
+	tar -czvf $@ $(DEBUG_SYMBOLS)
+
+
+SHA256SUMS: rasp-linux-default-x86_64-$(VERSION).tar.gz
+	sha256sum $(OUTPUT)/rasp rasp-linux-default-x86_64-$(VERSION).tar.gz > $@
+
+
+# for benchmark
+check_benchmark:
+	if echo $(VERSION) | grep -q benchmark; then \
+		echo "Version contains benchmark. Modifying files..."; \
+		sed -i "s/isBenchMark = false/isBenchMark = true/g" "jvm/JVMAgent/src/main/java/com/security/smithloader/SmithAgent.java"; \
+		sed -i "s/isBenchMark = false/isBenchMark = true/g" "jvm/JVMProbe/src/main/java/com/security/smith/SmithProbe.java"; \
+		sed -i "s/isBenchMark = false/isBenchMark = true/g" "jvm/JVMProbe/src/main/java/com/security/smith/asm/SmithMethodVisitor.java"; \
+	else \
+		echo "Version does not contain benchmark. Skipping modification."; \
+	fi
+
+set-version:
+	sed -i "s/1.0.0.1/${VERSION}/g" "librasp/src/settings.rs"
+	sed -i "s/1.0.0/${VERSION}/g" "node/src/client.js"
+	sed -i "s/1.0.0/${VERSION}/g" "python/python-probe/rasp/probe/client/smith_message.cpp"
+	sed -i "s/1.0.0/${VERSION}/g" "golang/client/smith_message.cpp"
+	sed -i "s/1.0.0/${VERSION}/g" "golang-ebpf/client/smith_message.cpp"
+	sed -i "s/1.0.0/${VERSION}/g" "php/client/smith_message.cpp"
+
+
+librasp:
 ifeq ($(STATIC), TRUE)
 	$(MAKE) -C librasp build-musl
-	cp librasp/target/x86_64-unknown-linux-musl/release/elkeid_rasp output/elkeid_rasp
 else
 	$(MAKE) -C librasp build
-	cp librasp/target/release/elkeid_rasp output/elkeid_rasp
 endif
-	
 
-server: ## build rasp_server bin file
-	mkdir -p output
+
+rasp-server:
 ifeq ($(STATIC), TRUE)
 	$(MAKE) -C rasp_server build-musl
-	cp rasp_server/target/x86_64-unknown-linux-musl/release/rasp_server output/rasp_server
 else
 	$(MAKE) -C rasp_server build
-	cp rasp_server/target/release/rasp_server output/rasp_server
 endif
 
 
-clean: ## clean your workspace
-	$(MAKE) -C rasp_server clean
-	$(MAKE) -C librasp clean
-	rm -rf pangolin/build
-	rm -rf python/build
-	rm -rf python/dist
-	rm -rf python/rasp.egg-info
-	rm -rf python/python-client/build
-	rm -rf python/python-inject/build
-	rm -rf golang/build
-	rm -rf output
+agent-plugin:
+ifeq ($(STATIC), TRUE)
+	$(MAKE) -C plugin plugin-musl
+else
+	$(MAKE) -C plugin plugin
+endif
 
 
-nsenter: ## build nsenter from util-linux
+NSMount:
+	cd NSMount && \
+	mkdir -p build && \
+	cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=$(STATIC) \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+	$(MAKE) -C build
+
+
+nsenter:
 ifeq ($(STATIC), TRUE)
 	cd util-linux && \
 	./autogen.sh && \
-	CC=$(CC) CFLAGS="-static" ./configure --enable-static-programs=nsenter --disable-all-programs --enable-nsenter && \
-	make
+	CFLAGS="-static" ./configure --enable-static-programs=nsenter --disable-all-programs --enable-nsenter && \
+	$(MAKE)
 else
 	cd util-linux && \
 	./autogen.sh && \
-	CC=$(CC) ./configure --enable-static-programs=nsenter --disable-all-programs --enable-nsenter && \
-	make
+	./configure --enable-static-programs=nsenter --disable-all-programs --enable-nsenter && \
+	$(MAKE)
 endif
 
-java-attach: ## build jattach using musl-gcc
+
+jattach:
 ifeq ($(STATIC), TRUE)
 	cd jvm/jattach && \
 	mkdir -p build && \
-	$(CC) -static -DJATTACH_VERSION=\"1.5\" src/jattach_posix.c -o build/jattach
+	$(CC) -static -DJATTACH_VERSION=\"2.1\" src/posix/*.c -o build/jattach
 else
 	cd jvm/jattach && \
 	mkdir -p build && \
-	$(CC) -DJATTACH_VERSION=\"1.5\" src/jattach_posix.c -o build/jattach
+	$(CC) -DJATTACH_VERSION=\"2.1\" src/posix/*.c -o build/jattach
 endif
 
 
-java-probe: ## build JVM probe
-	cd jvm/JVMProbe && mkdir -p output && ./gradlew proguard && cp build/libs/JVMProbe-1.0-SNAPSHOT-pro.jar output/SmithAgent.jar
+JVMAgent:
+	cd jvm/JVMAgent && \
+	mkdir -p output && \
+	BUILD_VERSION=${VERSION} ./gradlew shadow && \
+	cp build/libs/JVMAgent-1.0-SNAPSHOT-all.jar output/SmithAgent.jar
+JVMProbe:
+	cd jvm/JVMProbe && \
+	mkdir -p output && \
+	BUILD_VERSION=${VERSION} ./gradlew shadow && \
+	cp build/libs/JVMProbe-1.0-SNAPSHOT-all.jar output/SmithProbe.jar
 
-java-probe-example: ## build JVM probe example for test
-	cd jvm/JVMProbe && ./gradlew build:example
 
-java: java-attach java-probe ## java probe
-	@echo "build JVM probe"
-	mkdir -p output/rasp
-	cp jvm/JVMProbe/output/SmithAgent.jar output/rasp/SmithAgent.jar
-	cp jvm/jattach/build/jattach output/jattach
-
-process_injector: ## build process injector
-	mkdir -p pangolin/build && cd pangolin/build && \
-	CC=$(CC) CXX=$(CXX) \
-	LD=$(LD) cmake -DSTATIC_BUILD=$(STATIC) .. && make
+pangolin:
 	cd pangolin && \
-	CFLAGS=-DDISABLE_LOG=1 CC=$(CC) LD=$(LD) make -C shellcode && mv shellcode/lib* bin
-
-python-client: ## build python client
-	mkdir -p python/python-client/build && cd python/python-client/build && \
-	CC=cc CXX=g++ LD=ld CXXFLAGS="-Wl,--no-undefined" cmake .. && make
-
-
-python-inject: ## build python injector
-	mkdir -p python/python-inject/build && cd python/python-inject/build && \
-	CC=$(CC) CXX=$(CXX) cmake -DSTATIC_BUILD=$(STATIC) .. && make
-	cd python/python-inject && \
-	CFLAGS=-DDISABLE_LOG=1 CC=$(CC) LD=$(LD) make -C caller && mv caller/python_caller bin
-
-python-probe: python-client python-inject ## install python client so
-	cp python/python-client/bin/libpython_client.so python/rasp/resource/libsmith_client.so
-	cd python/ && python setup.py sdist bdist_wheel --universal
-
-python: python-probe ## build CPython probe
-	@echo "build CPython probe"
-	mkdir -p output/rasp/python
-	cp python/python-inject/bin/* output/rasp/
-	cp -r python/dist/rasp-1.0.0-py2.py3-none-any.whl output/rasp/python/
-	cd output/rasp/python/ && unzip -o rasp-1.0.0-py2.py3-none-any.whl
-	cp -r python/entry.py output/rasp/python/
+	CFLAGS=-DDISABLE_LOG=1 $(MAKE) -C shellcode && \
+	mkdir -p build && \
+	cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=$(STATIC) && \
+	$(MAKE) -C build
 
 
-go-probe: ## build golang probe
-	mkdir -p golang/build && cd golang/build && \
-	CC=$(CC) CXX=$(CXX) cmake -DSTATIC_BUILD=$(STATIC) .. && make
+python-loader:
+ifeq ($(STATIC), TRUE)
+	cd python/python-loader && \
+	mkdir -p build && \
+	cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=ON \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_OVERLAY_PORTS=$(VCPKG_OVERLAY_PORTS) \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+	$(MAKE) -C build
+else
+	cd python/python-loader && \
+	mkdir -p build && \
+	cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=OFF \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+	$(MAKE) -C build
+endif
 
 
-go: go-probe ## build go probe
-	@echo "build Golang probe"
-	cp golang/bin/go_probe output/rasp/go_probe
+python-probe:
+ifeq ($(STATIC), TRUE)
+ifeq ($(PY_PREBUILT), TRUE)
+	cd python/python-probe && \
+	mkdir -p rasp/probe/build && \
+	CC=$(GNU_CC) CXX=$(GNU_CXX) cmake -B rasp/probe/build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=ON \
+		-DPython_INCLUDE_DIRS=$(PYTHON2_INCLUDE) \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release rasp/probe && \
+	$(MAKE) -C rasp/probe/build && \
+	cp rasp/probe/lib/libpython_probe.so rasp/probe.so && \
+	CC=$(GNU_CC) CXX=$(GNU_CXX) cmake -B rasp/probe/build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=ON \
+		-DPython_INCLUDE_DIRS=$(PYTHON3_INCLUDE) \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release rasp/probe && \
+	$(MAKE) -C rasp/probe/build && \
+	cp rasp/probe/lib/libpython_probe.so rasp/probe.abi3.so && \
+	PREBUILT=1 python3 setup.py bdist_wheel
+else
+	cd python/python-probe && \
+	CC=$(GNU_CC) CXX=$(GNU_CXX) python3 setup.py bdist_wheel
+endif
+else
+ifeq ($(PY_PREBUILT), TRUE)
+	cd python/python-probe && \
+	mkdir -p rasp/probe/build && \
+	cmake -B rasp/probe/build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=ON \
+		-DPython_INCLUDE_DIRS=$(PYTHON2_INCLUDE) \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release rasp/probe && \
+	$(MAKE) -C rasp/probe/build && \
+	cp rasp/probe/lib/libpython_probe.so rasp/probe.so && \
+	cmake -B rasp/probe/build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=ON \
+		-DPython_INCLUDE_DIRS=$(PYTHON3_INCLUDE) \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release rasp/probe && \
+	$(MAKE) -C rasp/probe/build && \
+	cp rasp/probe/lib/libpython_probe.so rasp/probe.abi3.so && \
+	PREBUILT=1 python3 setup.py bdist_wheel
+else
+	cd python/python-probe && python3 setup.py bdist_wheel
+endif
+endif
 
 
+go-probe:
+ifeq ($(STATIC), TRUE)
+	cd golang && \
+	mkdir -p build && \
+	cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=ON \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_OVERLAY_PORTS=$(VCPKG_OVERLAY_PORTS) \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+	$(MAKE) -C build
+else
+	cd golang && \
+	mkdir -p build && \
+	cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=OFF \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release&& \
+	$(MAKE) -C build
+endif
 
-node: nsenter ## build node probe
-	@echo "budild NodeJS probe"
-	mkdir -p output/rasp/node
-	cp node/*.js output/rasp/node/
 
-build: nsenter process_injector java python go node rasp server ## build all
-	mkdir -p output
-	mkdir -p output/rasp
-	cp pangolin/bin/pangolin output/rasp/pangolin
-	cp pangolin/bin/lib*.so output/rasp/
-	cp util-linux/nsenter output/
+go-probe-ebpf:
+	mkdir -p golang-ebpf/output golang-ebpf/build
+ifeq ($(STATIC), TRUE)
+	curl -fsSL https://github.com/madler/zlib/releases/download/v1.3/zlib-1.3.tar.gz | tar -xz -C /tmp && cd /tmp/zlib-1.3 && CFLAGS="-fPIC" ./configure --static --prefix=/tmp/output && $(MAKE) && $(MAKE) install && rm -rf /tmp/zlib-1.3
+	curl -fsSL https://github.com/arachsys/libelf/archive/refs/tags/v0.188.tar.gz | tar -xz -C /tmp && cd /tmp/libelf-0.188 && sed -e 's|^CFLAGS = |CFLAGS = -fPIC -I/tmp/output/include -L/tmp/output/lib |g' -i Makefile && $(MAKE) PREFIX=/tmp/output install-static && rm -rf /tmp/libelf-0.188
+	echo -e 'prefix=/tmp/output\nexec_prefix=$${prefix}\nlibdir=$${exec_prefix}/lib\nincludedir=$${prefix}/include\n\nName: libelf\nDescription: elfutils libelf library to read and write ELF files\nVersion: 0.188\nURL: http://elfutils.org/\n\nLibs: -L$${libdir} -lelf\nCflags: -I$${includedir}\n\nRequires.private: zlib' > /tmp/output/lib/pkgconfig/libelf.pc
+
+	cd golang-ebpf && \
+	$(MAKE) -C ebpf clean && \
+	PKG_CONFIG_PATH=/tmp/output/lib/pkgconfig $(MAKE) -C ebpf \
+		V=1 \
+		HOSTCC=$(CC) \
+		EXTRA_LDFLAGS="-static-pie" \
+		EXTRA_CFLAGS="-fPIC -L/tmp/output/lib -I/tmp/output/include -D__always_inline=__inline__" \
+		BPF_CFLAGS="-D__x86_64__" && \
+	PKG_CONFIG_PATH="/tmp/output/lib/pkgconfig:$$(pwd)/ebpf/.output/libbpf/lib64/pkgconfig" cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=ON \
+		-DZLIB_ROOT=/tmp/output \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+	$(MAKE) -C build && \
+	cp bin/go_probe_ebpf output/go_probe_ebpf_4.14
+
+	cd golang-ebpf && \
+	$(MAKE) -C ebpf clean && \
+	PKG_CONFIG_PATH=/tmp/output/lib/pkgconfig $(MAKE) -C ebpf \
+		V=1 \
+		HOSTCC=$(CC) \
+		EXTRA_LDFLAGS="-static-pie" \
+		EXTRA_CFLAGS="-fPIC -L/tmp/output/lib -I/tmp/output/include -D__always_inline=__inline__" \
+		BPF_CFLAGS="-D__x86_64__ -DENABLE_HTTP -DDISABLE_HTTP_HEADER" && \
+	PKG_CONFIG_PATH="/tmp/output/lib/pkgconfig:$$(pwd)/ebpf/.output/libbpf/lib64/pkgconfig" cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=ON \
+		-DZLIB_ROOT=/tmp/output \
+		-DCMAKE_CXX_FLAGS="-DENABLE_HTTP -DDISABLE_HTTP_HEADER" \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+	$(MAKE) -C build && \
+	cp bin/go_probe_ebpf output/go_probe_ebpf_4.16
+
+	cd golang-ebpf && \
+	$(MAKE) -C ebpf clean && \
+	PKG_CONFIG_PATH=/tmp/output/lib/pkgconfig $(MAKE) -C ebpf \
+		V=1 \
+		HOSTCC=$(CC) \
+		EXTRA_LDFLAGS="-static-pie" \
+		EXTRA_CFLAGS="-fPIC -L/tmp/output/lib -I/tmp/output/include -D__always_inline=__inline__" \
+		BPF_CFLAGS="-D__x86_64__ -DENABLE_HTTP" && \
+	PKG_CONFIG_PATH="/tmp/output/lib/pkgconfig:$$(pwd)/ebpf/.output/libbpf/lib64/pkgconfig" cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=ON \
+		-DZLIB_ROOT=/tmp/output \
+		-DCMAKE_CXX_FLAGS="-DENABLE_HTTP" \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+	$(MAKE) -C build && \
+	cp bin/go_probe_ebpf output/go_probe_ebpf_5.2
+
+	cd golang-ebpf && \
+	$(MAKE) -C ebpf clean && \
+	PKG_CONFIG_PATH=/tmp/output/lib/pkgconfig $(MAKE) -C ebpf \
+		V=1 \
+		HOSTCC=$(CC) \
+		EXTRA_LDFLAGS="-static-pie" \
+		EXTRA_CFLAGS="-fPIC -L/tmp/output/lib -I/tmp/output/include -D__always_inline=__inline__" \
+		BPF_CFLAGS="-D__x86_64__ -DENABLE_HTTP -DUSE_RING_BUFFER" && \
+	PKG_CONFIG_PATH="/tmp/output/lib/pkgconfig:$$(pwd)/ebpf/.output/libbpf/lib64/pkgconfig" cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSTATIC_BUILD=ON \
+		-DZLIB_ROOT=/tmp/output \
+		-DCMAKE_CXX_FLAGS="-DENABLE_HTTP -DUSE_RING_BUFFER" \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+	$(MAKE) -C build && \
+	cp bin/go_probe_ebpf output/go_probe_ebpf_5.8
+else
+	cd golang-ebpf && \
+	$(MAKE) -C ebpf clean && \
+	$(MAKE) -C ebpf \
+		V=1 \
+		HOSTCC=$(CC) \
+		BPF_CFLAGS="-D__x86_64__" && \
+	PKG_CONFIG_PATH=$$(pwd)/ebpf/.output/libbpf/lib64/pkgconfig cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+	$(MAKE) -C build && \
+	cp bin/go_probe_ebpf output/go_probe_ebpf_4.14
+
+	cd golang-ebpf && \
+	$(MAKE) -C ebpf clean && \
+	$(MAKE) -C ebpf \
+		V=1 \
+		HOSTCC=$(CC) \
+		BPF_CFLAGS="-D__x86_64__ -DENABLE_HTTP -DDISABLE_HTTP_HEADER" && \
+	PKG_CONFIG_PATH=$$(pwd)/ebpf/.output/libbpf/lib64/pkgconfig cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_CXX_FLAGS="-DENABLE_HTTP -DDISABLE_HTTP_HEADER" \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+	$(MAKE) -C build && \
+	cp bin/go_probe_ebpf output/go_probe_ebpf_4.16
+
+	cd golang-ebpf && \
+	$(MAKE) -C ebpf clean && \
+	$(MAKE) -C ebpf \
+		V=1 \
+		HOSTCC=$(CC) \
+		BPF_CFLAGS="-D__x86_64__ -DENABLE_HTTP" && \
+	PKG_CONFIG_PATH=$$(pwd)/ebpf/.output/libbpf/lib64/pkgconfig cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_CXX_FLAGS="-DENABLE_HTTP" \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+	$(MAKE) -C build && \
+	cp bin/go_probe_ebpf output/go_probe_ebpf_5.2
+
+	cd golang-ebpf && \
+	$(MAKE) -C ebpf clean && \
+	$(MAKE) -C ebpf \
+		V=1 \
+		HOSTCC=$(CC) \
+		BPF_CFLAGS="-D__x86_64__ -DENABLE_HTTP -DUSE_RING_BUFFER" && \
+	PKG_CONFIG_PATH=$$(pwd)/ebpf/.output/libbpf/lib64/pkgconfig cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_CXX_FLAGS="-DENABLE_HTTP -DUSE_RING_BUFFER" \
+		-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+		-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+	$(MAKE) -C build && \
+	cp bin/go_probe_ebpf output/go_probe_ebpf_5.8
+endif
 
 
-install: ## install to $PREFIX default: /etc/elkeid/plugin/RASP
-	mkdir -p $(PREFIX)
-	cp -r output/* $(PREFIX)
+node-probe:
+	cd node && \
+	npm install && \
+	npm run build
 
+
+php-probe:
+ifeq ($(STATIC), TRUE)
+	cd php && \
+	mkdir -p output build && \
+	for header in ${PHP_HEADERS}/*; \
+		do \
+			[ -d include ] && rm -rf include; \
+			cp -r $$header include && \
+			CC=$(GNU_CC) CXX=$(GNU_CXX) cmake -B build \
+				-DCMAKE_BUILD_TYPE=Release \
+				-DSTATIC_BUILD=ON \
+				-DPHP_EXTENSIONS_INCLUDE_DIR=$$(pwd)/include \
+				-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+				-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+			$(MAKE) -C build && \
+			cp lib/libphp_probe.so output/libphp_probe-$$(basename $$header).so; \
+		done
+else
+	cd php && \
+	mkdir -p output build && \
+	for header in ${PHP_HEADERS}/*; \
+		do \
+			[ -d include ] && rm -rf include; \
+			cp -r $$header include && \
+			cmake -B build \
+				-DCMAKE_BUILD_TYPE=Release \
+				-DSTATIC_BUILD=ON \
+				-DPHP_EXTENSIONS_INCLUDE_DIR=$$(pwd)/include \
+				-DCMAKE_TOOLCHAIN_FILE="$(VCPKG_INSTALLATION_ROOT)/scripts/buildsystems/vcpkg.cmake" \
+				-DVCPKG_TARGET_TRIPLET=x64-linux-release && \
+			$(MAKE) -C build && \
+			cp lib/libphp_probe.so output/libphp_probe-$$(basename $$header).so; \
+		done
+endif
+
+
+$(OUTPUT): check_benchmark set-version agent-plugin nsenter pangolin jattach JVMAgent JVMProbe python-probe python-loader go-probe go-probe-ebpf node-probe php-probe rasp-server librasp NSMount
+	mkdir -p $(OUTPUT) $(LIB_OUTPUT) $(LIB_OUTPUT)/golang $(LIB_OUTPUT)/java $(LIB_OUTPUT)/node $(LIB_OUTPUT)/php $(LIB_OUTPUT)/python
+
+	cp plugin/settings.toml $(OUTPUT)/settings.toml
+
+ifeq ($(STATIC), TRUE)
+	cp librasp/target/x86_64-unknown-linux-musl/release/elkeid_rasp $(OUTPUT)/elkeid_rasp
+	cp plugin/target/x86_64-unknown-linux-musl/release/elkeid_rasp_monitor $(OUTPUT)/rasp
+	cp rasp_server/target/x86_64-unknown-linux-musl/release/rasp_server $(LIB_OUTPUT)/rasp_server
+	cp util-linux/nsenter.static $(OUTPUT)/nsenter
+else
+	cp librasp/target/release/elkeid_rasp $(OUTPUT)/elkeid_rasp
+	cp plugin/target/release/elkeid_rasp_monitor $(OUTPUT)/rasp
+	cp rasp_server/target/release/rasp_server $(LIB_OUTPUT)/rasp_server
+	cp util-linux/nsenter $(OUTPUT)/nsenter
+endif
+
+	cp NSMount/bin/NSMount $(OUTPUT)/NSMount
+	cp pangolin/bin/pangolin $(LIB_OUTPUT)/pangolin
+
+	cp jvm/JVMAgent/output/SmithAgent.jar $(LIB_OUTPUT)/java/SmithAgent.jar
+	cp jvm/JVMProbe/output/SmithProbe.jar $(LIB_OUTPUT)/java/SmithProbe.jar
+	cp jvm/jattach/build/jattach $(LIB_OUTPUT)/java/jattach
+
+	cp python/python-loader/bin/python_loader $(LIB_OUTPUT)/python
+	cp python/python-probe/dist/rasp-*.whl $(LIB_OUTPUT)/python && cd $(LIB_OUTPUT)/python/ && unzip -o rasp-*.whl
+
+	cp golang/bin/go_probe $(LIB_OUTPUT)/golang/go_probe
+	cp golang/bin/go_loader $(LIB_OUTPUT)/golang/go_loader
+	cp golang-ebpf/output/* $(LIB_OUTPUT)/golang
+
+	cp node/output/*.js $(LIB_OUTPUT)/node
+	cp node/scripts/*.js $(LIB_OUTPUT)/node
+	cp php/output/* $(LIB_OUTPUT)/php
+
+
+define split_debug
+	objcopy --only-keep-debug $(1) $(DEBUG_SYMBOLS)/$$(basename $(1)).debug
+	strip --strip-debug --strip-unneeded $(1)
+	objcopy --add-gnu-debuglink=$(DEBUG_SYMBOLS)/$$(basename $(1)).debug $(1)
+endef
+
+
+$(DEBUG_SYMBOLS): | $(OUTPUT)
+	mkdir -p $@
+
+	$(call split_debug, $(OUTPUT)/rasp)
+	$(call split_debug, $(OUTPUT)/elkeid_rasp)
+	$(call split_debug, $(OUTPUT)/nsenter)
+	$(call split_debug, $(LIB_OUTPUT)/pangolin)
+	$(call split_debug, $(LIB_OUTPUT)/rasp_server)
+	$(call split_debug, $(LIB_OUTPUT)/java/jattach)
+	$(call split_debug, $(LIB_OUTPUT)/python/python_loader)
+	$(call split_debug, $(LIB_OUTPUT)/python/rasp/probe.so)
+	$(call split_debug, $(LIB_OUTPUT)/python/rasp/probe.abi3.so)
+	$(foreach file, $(wildcard $(LIB_OUTPUT)/golang/*), $(call split_debug, $(file));)
+	$(foreach file, $(wildcard $(LIB_OUTPUT)/php/*), $(call split_debug, $(file));)

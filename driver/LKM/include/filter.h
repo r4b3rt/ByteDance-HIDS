@@ -3,17 +3,6 @@
 #ifndef FILTER_H
 #define FILTER_H
 
-#include <linux/mm.h>
-#include <linux/fs.h>
-#include <linux/device.h>
-#include <linux/module.h>
-#include <linux/slab.h>
-#include <linux/list.h>
-#include <linux/uaccess.h>
-#include <linux/spinlock.h>
-#include <linux/string.h>
-#include <linux/rbtree.h>
-
 #define FILTER_DEVICE_NAME "hids_driver_allowlist"
 #define FILTER_CLASS_NAME "hids_driver_allowlist"
 
@@ -23,8 +12,16 @@ int filter_init(void);
 
 void filter_cleanup(void);
 
-int execve_exe_check(char *data);
+int execve_exe_check(char *data, int len);
 
-int execve_argv_check(char *data);
+int file_notify_check(u8 *uuid, unsigned long inode, const char *name, int nlen, int mask);
+
+int execve_argv_check(char *data, int len);
+
+size_t filter_process_allowlist(const __user char *buff, size_t len);
+
+/* opened-instances tracing for trace proc entry and filter device */
+void filter_show_instances(void);
+void trace_show_instances(void);
 
 #endif /* FILTER_H */

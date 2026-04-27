@@ -4,14 +4,15 @@
 English | [简体中文](README-zh_CN.md)
 ## System Architecture
 
-<img src="docs/server.png"/>
+<img src="docs/server_new.png"/>
 
 ## Overview
-Elkeid Server contains 4 modules:：
+Elkeid Server contains 5 modules:：
 1. AgentCenter (AC) is responsible for communicating with the Agent, collecting Agent data and simply processing and then writing to the Kafka cluster. At the same time, it is also responsible for the management of the Agent, including Agent upgrade, configuration modification, task distribution, etc. In addition, the AC also provides HTTP services, through which the Manager manages the AC and the Agent.
 2. In ServiceDiscovery (SD), each service module needs to register with SD regularly and synchronize service information, so as to ensure that the instances in each service module are visible to each other and facilitate direct communication. Since SD maintains the status information of each registered service, when a service user requests service discovery, SD will perform load balancing. For example, the Agent requests a list of AC instances, and SD directly returns the AC instance with the least load pressure.
 3. Manager is responsible for managing the entire back-end and providing related query and management interfaces. Including the management of the AC cluster, monitoring the status of the AC, and managing all agents through the AC, collecting the running status of the agent, and delivering tasks to the agent. At the same time, the manager also manages real-time and offline computing clusters.
-4. The real-time/offline computing module consumes the data collected by AgentCenter in the kafka cluster for real-time and offline analysis and processing. (This part is not open source yet)
+4. Elkeid Console: Elkeid web console。
+5. **[Elkeid HUB](https://github.com/bytedance/Elkeid-HUB)** : Elkeid HIDS RuleEngine。
 
 In short, AgentCenter collects Agent data, real-time/offline calculation module analyzes and processes the collected data, Manager manages AgentCenter and computing module, ServiceDiscovery connects all services and nodes.
 
@@ -21,31 +22,18 @@ In short, AgentCenter collects Agent data, real-time/offline calculation module 
 - Simple deployment, few dependencies and easy maintenance
 
 ## Deployment document
-- [docker test deployment document](docs/docker-install.md)
-- [deployment document](docs/install.md)
+- [Deploy by Elkeidup](../elkeidup/README.md)
 
-## API interface documentation
-The Manger API uses token for authentication. Before calling all other interfaces, you need to use the /api/v1/user/login interface to get the token.
-```
-curl --location --request POST 'http://127.0.0.1:6701/api/v1/user/login' \
---data-raw '{
-    "username": "hids_test",
-    "password": "hids_test"
-}'
+## Build
+1. AgentCenter(AC): Executing './build.sh' in `Elkeid/server/agent_center` directory will generate the product' bin.tar.gz 'in the output directory.
+2. ServiceDiscovery(SD)：Executing `Elkeid/server/service_discovery` directory will generate the product' bin.tar.gz 'in the output directory.
+3. Manager：Executing `Elkeid/server/manager` directory will generate the product' bin.tar.gz 'in the output directory.
 
+## Upgrade
+Refer to the backend section of [Build Elkeid CWPP from Source](../elkeidup/build_package-zh_CN.md) to deploy or upgrade.
 
-{
-    "code": 0,
-    "msg": "success",
-    "data": {
-        "token": "xxxxxxxxxxx"
-    }
-}
-```
-Then add the token to the header of each request.
-```
-curl --location --request GET 'http://127.0.0.1:6701/api/v1/agent/getStatus'  -H "token:xxxxxxxxxxx"
-```
-For details, please refer to [API interface documentation](https://documenter.getpostman.com/view/9865152/TzCTZ5Do#intro)
+## Console User Guide
+- [Elkeid Console User Guide](docs/console_tutorial/Elkeid_Console_manual.md)
+
 ## License
 Elkeid Server are distributed under the Apache-2.0 license.

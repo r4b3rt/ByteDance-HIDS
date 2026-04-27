@@ -1,9 +1,13 @@
 package kafka
 
 import (
-	"github.com/Shopify/sarama"
-	"github.com/bytedance/Elkeid/server/agent_center/common/ylog"
+	"fmt"
 	"sync"
+
+	"github.com/IBM/sarama"
+	"github.com/bytedance/Elkeid/server/agent_center/common/ylog"
+	pb "github.com/bytedance/Elkeid/server/agent_center/grpctrans/proto"
+	"github.com/gogo/protobuf/proto"
 )
 
 // Consumer 消费者
@@ -12,7 +16,7 @@ type Consumer struct {
 	Topic    string
 }
 
-//NewProducer creates kafka async producer
+// NewProducer creates kafka async producer
 func NewConsumerWithLog(addrs []string, topic string, logPath string) (*Consumer, error) {
 	logger := ylog.NewYLog(
 		ylog.WithLogFile(logPath),
@@ -73,9 +77,11 @@ func consume(thr *sync.WaitGroup, topic string, partition int32, consumer sarama
 	for {
 		select {
 		case msg := <-pc.Messages():
-			ylog.Infof("KAFKA", "Partition:%d, Offset:%d, Key:%s, Value:%s", msg.Partition, msg.Offset, string(msg.Key), string(msg.Value))
+			item := pb.MQRawData{}
+			proto.Unmarshal(msg.Value, &item)
+			fmt.Printf("KAFKA Partition:%d, Offset:%d, Key:%s, Vaule:%v\n", msg.Partition, msg.Offset, string(msg.Key), item)
 		case err := <-pc.Errors():
-			ylog.Errorf("KAFKA", "error %s", err.Error())
+			fmt.Printf("KAFKA error %s\n", err.Error())
 			if err.Err == sarama.ErrClosedClient {
 				return
 			}

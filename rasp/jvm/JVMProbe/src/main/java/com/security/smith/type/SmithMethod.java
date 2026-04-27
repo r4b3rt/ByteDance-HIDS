@@ -1,6 +1,16 @@
 package com.security.smith.type;
 
+import java.util.Set;
 public class SmithMethod {
+    private int id;
+    private String name;
+    private String desc;
+    private boolean block;
+    private String preHook;
+    private String postHook;
+    private String exceptionHook;
+    private Set<String> types;
+
     public int getId() {
         return id;
     }
@@ -25,16 +35,43 @@ public class SmithMethod {
         this.desc = desc;
     }
 
-    public boolean isRet() {
-        return ret;
+    public boolean isBlock() {
+        return block;
     }
 
-    public void setRet(boolean ret) {
-        this.ret = ret;
+    public void setBlock(boolean block) {
+        this.block = block;
     }
 
-    private int id;
-    private String name;
-    private String desc;
-    private boolean ret;
+    public String getPreHook() {
+        return preHook;
+    }
+
+    public void setPreHook(String preHook) {
+        this.preHook = preHook;
+    }
+
+    public String getPostHook() {
+        return postHook;
+    }
+
+    public void setPostHook(String postHook) {
+        this.postHook = postHook;
+    }
+
+    public String getExceptionHook() {
+        return exceptionHook;
+    }
+
+    public void setExceptionHook(String exceptionHook) {
+        this.exceptionHook = exceptionHook;
+    }
+
+    public Set<String> getTypes() {
+        return types;
+    }
+
+    public void setTypes(Set<String> types) {
+        this.types = types;
+    }
 }

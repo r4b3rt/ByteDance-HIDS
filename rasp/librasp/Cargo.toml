@@ -8,16 +8,18 @@ version = "1.0.1"
 log = "0.4.0"
 env_logger = "0.7.1"
 crossbeam = "0.8.0"
-procfs = { git = "https://github.com/AlkenePan/procfs.git" }
+procfs = { git = "https://github.com/yoloyyh/procfs.git", tag = "v1.0"}
 fs_extra = "1.2.0"
 clap = "2.33.3"
 serde = {version = "1.0", features = ["derive"]}
 serde_json = "1.0"
 regex = "1"
 libc = "0.2.80"
+nix = "0.24"
 anyhow = "1.0.38"
 # elf
 goblin = "0.3.4"
+byteorder = "1.0"
 # lru cache
 lru_time_cache = "0.11.8"
 memmap = "0.7.0"
@@ -26,6 +28,13 @@ npm-package-json = "0.1.3"
 version-compare = "0.0.10"
 # time
 coarsetime = "0.1"
+wait-timeout = "0.2.0"
+lazy_static = "1.4.0"
+
+cgroups-rs = "0.2.6"
+# plugins
+plugins = { path = "../../plugins/lib/rust"}
+
 
 [lib]
 name = "librasp"
@@ -39,6 +48,3 @@ path = "src/main.rs"
 
 [dependencies.rasp_server]
 path = "../rasp_server"
-
-[features]
-bin_mode = []

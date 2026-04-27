@@ -1,209 +1,122 @@
 #include "smith_client.h"
-#include <event2/thread.h>
-#include <sys/un.h>
-#include <common/log.h>
+#include "smith_probe.h"
+#include <aio/ev/timer.h>
+#include <aio/net/stream.h>
+#include <zero/log.h>
+#include <unistd.h>
 
-constexpr auto CLIENT_TIMER = 60;
-
-constexpr auto PROTOCOL_HEADER_SIZE = 4;
-constexpr auto PROTOCOL_MAX_SIZE = 10240;
-constexpr auto EVENT_BUFFER_MAX_SIZE = 1024 * 1024;
+using namespace std::chrono_literals;
 
 constexpr auto SOCKET_PATH = "/var/run/smith_agent.sock";
+constexpr auto MESSAGE_DIRECTORY = "/var/run/elkeid_rasp";
 
-CSmithClient::CSmithClient(ISmithNotify *notify) {
-    evthread_use_pthreads();
+std::shared_ptr<zero::async::promise::Promise<void>>
+transfer(
+        const std::shared_ptr<aio::Context> &context,
+        const zero::ptr::RefPtr<aio::ISender<SmithMessage>> &sender,
+        const zero::ptr::RefPtr<aio::IReceiver<SmithMessage>> &receiver
+) {
+    return aio::net::stream::connect(
+            context,
+            SOCKET_PATH
+    )->then([=](const zero::ptr::RefPtr<aio::ev::IBuffer> &buffer) {
+        return zero::async::promise::all(
+                zero::async::promise::doWhile([=]() {
+                    return buffer->readExactly(4)->then([=](const std::vector<std::byte> &header) {
+                        return buffer->readExactly(ntohl(*(uint32_t *) header.data()));
+                    })->then([=](const std::vector<std::byte> &msg) {
+                        LOG_INFO("message: %.*s", msg.size(), msg.data());
 
-    mNotify = notify;
-    mEventBase = event_base_new();
+                        try {
+                            sender->trySend(nlohmann::json::parse(msg).get<SmithMessage>());
+                        } catch (const nlohmann::json::exception &e) {
+                            LOG_ERROR("exception: %s", e.what());
+                        }
+                    });
+                }),
+                zero::async::promise::doWhile([=]() {
+                    return receiver->receive()->then([=](const SmithMessage &message) {
+                        std::string msg = nlohmann::json(message).dump(
+                                -1,
+                                ' ',
+                                false,
+                                nlohmann::json::error_handler_t::replace
+                        );
+
+                        uint32_t length = htonl(msg.length());
+
+                        auto result = buffer->submit({(const std::byte *) &length, sizeof(uint32_t)});
+
+                        if (!result) {
+                            LOG_WARNING("submit data failed");
+                            return zero::async::promise::reject<void>({-1, "submit data failed"});
+                        }
+                        result =  buffer->submit({(const std::byte *) msg.data(), msg.size()});
+                        if (!result) {
+                            LOG_WARNING("submit data failed");
+                            return zero::async::promise::reject<void>({-1, "submit data failed"});
+                        }
+
+                        if (buffer->pending() > 1024 * 1024)
+                            return buffer->drain();
+
+                        return zero::async::promise::resolve<void>();
+                    });
+                })
+        );
+    });
 }
 
-CSmithClient::~CSmithClient() {
-    if (mEventBase) {
-        event_base_free(mEventBase);
-        mEventBase = nullptr;
-    }
-}
-
-bool CSmithClient::start() {
-    LOG_INFO("client start");
-
-    if (!mEventBase) {
-        LOG_ERROR("event base null");
-        return false;
-    }
-
-    connect();
-    setTimer();
-
-    mThread.start(this, &CSmithClient::loopThread);
-
-    return true;
-}
-
-bool CSmithClient::stop() {
-    cancelTimer();
-    disconnect();
-
-    event_base_loopbreak(mEventBase);
-    mThread.stop();
-
-    return true;
-}
-
-void CSmithClient::onBufferRead(bufferevent *bev) {
-    evbuffer *input = bufferevent_get_input(bev);
-
-    int length = 0;
-    evbuffer_copyout(input, &length, PROTOCOL_HEADER_SIZE);
-
-    length = ntohl(length);
-
-    if (length > PROTOCOL_MAX_SIZE) {
-        LOG_ERROR("message max size limit: %d", length);
-        disconnect();
-        return;
-    }
-
-    if (evbuffer_get_length(input) < length + PROTOCOL_HEADER_SIZE)
-        return;
-
-    char *buffer = new char[length + 1]();
-
-    evbuffer_drain(input, PROTOCOL_HEADER_SIZE);
-    evbuffer_remove(input, buffer, length);
-
-    if (mNotify)
-        mNotify->onMessage(nlohmann::json::parse(buffer).get<CSmithMessage>());
-
-    delete []buffer;
-}
-
-void CSmithClient::onBufferWrite(bufferevent *bev) {
-
-}
-
-void CSmithClient::onBufferEvent(bufferevent *bev, short what) {
-    if (what & BEV_EVENT_EOF || what & BEV_EVENT_ERROR) {
-        LOG_INFO("buffer event: %hd", what);
-        disconnect();
-    }
-}
-
-bool CSmithClient::writeBuffer(const std::string &message) {
-    AutoMutex _0_(mBevMutex);
-
-    if (!mBev)
-        return false;
-
-    evbuffer *output = bufferevent_get_output(mBev);
-
-    if (evbuffer_get_length(output) > EVENT_BUFFER_MAX_SIZE) {
-        LOG_WARNING("buffer max size limit");
-        return false;
-    }
-
-    int length = htonl(message.length());
-
-    bufferevent_write(mBev, &length, sizeof(length));
-    bufferevent_write(mBev, message.data(), message.size());
-
-    return true;
-}
-
-bool CSmithClient::connect() {
-    AutoMutex _0_(mBevMutex);
-
-    sockaddr_un un = {};
-
-    un.sun_family = AF_UNIX;
-    strcpy(un.sun_path, SOCKET_PATH);
-
-    mBev = bufferevent_socket_new(mEventBase, -1, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_THREADSAFE);
-
-    if (!mBev) {
-        LOG_ERROR("buffer event null");
-        return false;
-    }
-
-    if (bufferevent_socket_connect(mBev, (sockaddr *)&un, sizeof(un)) < 0) {
-        LOG_ERROR("connect error: %s", evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
-
-        bufferevent_free(mBev);
-        mBev = nullptr;
-
-        return false;
-    }
-
-    struct stub {
-        static void onRead(bufferevent *bev, void *ctx) {
-            static_cast<CSmithClient *>(ctx)->onBufferRead(bev);
-        }
-
-        static void onWrite(bufferevent *bev, void *ctx) {
-            static_cast<CSmithClient *>(ctx)->onBufferWrite(bev);
-        }
-
-        static void onEvent(bufferevent *bev, short what, void *ctx) {
-            static_cast<CSmithClient *>(ctx)->onBufferEvent(bev, what);
-        }
+std::pair<zero::ptr::RefPtr<aio::IReceiver<SmithMessage>>, zero::ptr::RefPtr<aio::ISender<SmithMessage>>>
+startClient(const std::shared_ptr<aio::Context> &context) {
+    zero::ptr::RefPtr<aio::IChannel<SmithMessage>> channels[2] = {
+            zero::ptr::makeRef<aio::Channel<SmithMessage, 100>>(context),
+            zero::ptr::makeRef<aio::Channel<SmithMessage, 100>>(context)
     };
 
-    bufferevent_setcb(mBev, stub::onRead, stub::onWrite, stub::onEvent, this);
-    bufferevent_enable(mBev, EV_READ | EV_WRITE);
-    bufferevent_setwatermark(mBev, EV_READ, PROTOCOL_HEADER_SIZE, EVENT_BUFFER_MAX_SIZE);
+    zero::async::promise::doWhile([=]() {
+        return transfer(context, channels[0], channels[1])->fail([=](const zero::async::promise::Reason &reason) {
+            LOG_WARNING(
+                    "transfer finished[code[%d] msg[%s]]",
+                    reason.code,
+                    reason.message.c_str()
+            );
+            gProbe->discard_send++;
+            return zero::ptr::makeRef<aio::ev::Timer>(context)->setTimeout(1min);
+        });
+    });
 
-    return true;
-}
+    zero::ptr::makeRef<aio::ev::Timer>(context)->setInterval(
+            5min,
+            [
+                    channel = channels[0],
+                    path = std::filesystem::path(MESSAGE_DIRECTORY) / zero::strings::format("%d.json", getpid())
+            ]() {
+                std::ifstream stream(path);
 
-void CSmithClient::disconnect() {
-    AutoMutex _0_(mBevMutex);
+                if (!stream.is_open())
+                    return true;
 
-    LOG_INFO("disconnect");
+                LOG_INFO("read message from %s", path.string().c_str());
 
-    if (mBev) {
-        bufferevent_free(mBev);
-        mBev = nullptr;
-    }
-}
+                try {
+                    for (const auto &message: nlohmann::json::parse(stream).get<std::list<SmithMessage>>())
+                        channel->trySend(message);
+                } catch (const nlohmann::json::exception &e) {
+                    LOG_ERROR("exception: %s", e.what());
+                }
 
-void CSmithClient::setTimer() {
-    struct stub {
-        static void onEvent(evutil_socket_t fd ,short Event, void* arg) {
-            static_cast<CSmithClient *>(arg)->onTimer();
-        }
-    };
+                stream.close();
 
-    mTimer = event_new(mEventBase, -1, EV_PERSIST, stub::onEvent, this);
+                std::error_code ec;
 
-    timeval timeOutVal = {CLIENT_TIMER, 0};
-    evtimer_add(mTimer, &timeOutVal);
-}
+                if (!std::filesystem::remove(path, ec)) {
+                    LOG_WARNING("remove failed: %s", ec.message().c_str());
+                }
 
-void CSmithClient::cancelTimer() {
-    if (mTimer) {
-        evtimer_del(mTimer);
-        event_free(mTimer);
+                return true;
+            }
+    );
 
-        mTimer = nullptr;
-    }
-}
-
-void CSmithClient::onTimer() {
-    if (mBev) {
-        LOG_INFO("heartbeat");
-        write({emHeartBeat, nlohmann::json::object()});
-    } else {
-        LOG_INFO("reconnect");
-        connect();
-    }
-}
-
-void CSmithClient::loopThread() {
-    LOG_INFO("client loop thread start");
-    event_base_dispatch(mEventBase);
-}
-
-bool CSmithClient::write(const CSmithMessage &message) {
-    return writeBuffer(nlohmann::json(message).dump());
+    return {channels[0], channels[1]};
 }

@@ -3,17 +3,15 @@
 
 #include "basic.h"
 
-#pragma pack(push, 1)
-
 namespace go {
-    struct exec_cmd {
-        go::string path;
-        go::slice<go::string> args;
-    };
+    namespace os::exec {
+        struct Cmd {
+            go::String path;
+            go::Slice<go::String> args;
+        };
+    }
 
-    METADATA(exec_cmd, go::string, go::slice<go::string>)
+    METADATA(os::exec::Cmd, go::String, go::Slice<go::String>)
 }
-
-#pragma pack(pop)
 
 #endif //GO_PROBE_OS_H

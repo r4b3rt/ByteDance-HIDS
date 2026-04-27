@@ -3,13 +3,14 @@ package svr_registry
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/bytedance/Elkeid/server/agent_center/common"
-	"github.com/bytedance/Elkeid/server/agent_center/common/ylog"
-	"github.com/bytedance/Elkeid/server/agent_center/grpctrans/grpc_hander"
-	"github.com/bytedance/Elkeid/server/agent_center/httptrans/midware"
-	"github.com/levigross/grequests"
 	"math/rand"
 	"time"
+
+	"github.com/bytedance/Elkeid/server/agent_center/common"
+	"github.com/bytedance/Elkeid/server/agent_center/common/ylog"
+	"github.com/bytedance/Elkeid/server/agent_center/grpctrans/grpc_handler"
+	"github.com/bytedance/Elkeid/server/agent_center/httptrans/midware"
+	"github.com/levigross/grequests"
 )
 
 type ServerRegistry struct {
@@ -48,7 +49,7 @@ func NewRegistry(svrName, ip string, addrList []string, port int) *ServerRegistr
 	ylog.Infof("NewRegistry", ">>>>new registry: %s", *svr)
 	option := midware.AuthRequestOption()
 	option.JSON = svr
-	resp, err := grequests.Post(fmt.Sprintf("http://%s/registry/register", svr.randomAddr()), option)
+	resp, err := grequests.Post(fmt.Sprintf("http://%s/registry/register", svr.randomAddr()), grequests.FromRequestOptions(option))
 	if err != nil {
 		fmt.Printf("[NewRegistry] >>>>new registry %s error, resp: %s\n", svr.print(), resp.String())
 		ylog.Errorf("NewRegistry", "NewRegistry failed: %v", err)
@@ -71,11 +72,11 @@ func (s *ServerRegistry) renewRegistry() {
 			url := fmt.Sprintf("http://%s/registry/register", s.randomAddr())
 
 			//Update the current number of connections
-			s.Weight = grpc_hander.GlobalGRPCPool.GetCount()
+			s.Weight = grpc_handler.GlobalGRPCPool.GetCount()
 			option := midware.AuthRequestOption()
 			option.JSON = s
 			ylog.Infof("RenewRegistry", ">>>>register %s to FindYou %s", s.print(), url)
-			resp, err := grequests.Post(url, option)
+			resp, err := grequests.Post(url, grequests.FromRequestOptions(option))
 			if err != nil {
 				ylog.Errorf("RenewRegistry", "####renew registry failed: %v", err)
 				continue
@@ -97,7 +98,7 @@ func (s *ServerRegistry) Stop() {
 
 	option := midware.AuthRequestOption()
 	option.JSON = s
-	if resp, err = grequests.Post(fmt.Sprintf("http://%s/registry/evict", s.randomAddr()), option); err != nil {
+	if resp, err = grequests.Post(fmt.Sprintf("http://%s/registry/evict", s.randomAddr()), grequests.FromRequestOptions(option)); err != nil {
 		ylog.Errorf("ServerRegistryStop", "####evict server failed: %v", err)
 		return
 	}

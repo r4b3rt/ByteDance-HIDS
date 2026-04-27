@@ -2,7 +2,6 @@ package com.security.smith.log;
 
 import com.security.smith.common.ProcessHelper;
 
-import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.logging.FileHandler;
@@ -10,22 +9,23 @@ import java.util.logging.Logger;
 import java.util.logging.SimpleFormatter;
 
 public class SmithLogger {
-    public static Logger logger = Logger.getGlobal();
+    public static Logger logger = Logger.getLogger("RASP");
+    private static FileHandler fileHandler = null;
 
-    static {
-        logger.setUseParentHandlers(false);
 
+    public static void loggerProberInit() {
+        
         try {
-            int pid = ProcessHelper.getCurrentPID();
-            String filename = String.format("/tmp/JVMProbe.%d.log", pid);
+            logger.setUseParentHandlers(false);
+            String filename = String.format("/tmp/JVMProbe.%d.log", ProcessHelper.getCurrentPID());
 
-            FileHandler handler = new FileHandler(filename, true);
-            logger.addHandler(handler);
+            fileHandler = new FileHandler(filename, 5 * 1024 * 1024, 5, true);
+            logger.addHandler(fileHandler);
 
             SimpleFormatter formatter = new SimpleFormatter();
-            handler.setFormatter(formatter);
+            fileHandler.setFormatter(formatter);
 
-        } catch (IOException | NumberFormatException e) {
+        } catch (Exception e) {
             e.printStackTrace();
         }
     }
@@ -37,5 +37,22 @@ public class SmithLogger {
         tr.printStackTrace(pw);
 
         logger.severe(sw.toString());
+    }
+
+    public static void loggerProberUnInit() {
+        try {
+            if (null != fileHandler) {
+                Logger logger = Logger.getLogger("RASP");
+
+                if (logger != null) {
+                    logger.removeHandler(fileHandler);
+                    logger = null;
+                }
+                fileHandler.close();
+                fileHandler = null;
+            }
+        } catch (Throwable t) {
+
+        }
     }
 }

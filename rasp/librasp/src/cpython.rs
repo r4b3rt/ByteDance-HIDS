@@ -1,152 +1,227 @@
 use anyhow::{anyhow, Result};
 use log::*;
-use procfs::process::Process;
 
-use std::{collections::HashMap, ffi::OsString, process::Command};
+use std::fs::{self, File};
+use std::path::PathBuf;
+use std::process::Command;
 
+use goblin::elf::Elf;
+use memmap::MmapOptions;
+use regex::Regex;
+
+use crate::async_command::run_async_process;
+use crate::runtime::{ProbeCopy, ProbeState, ProbeStateInspect};
 use crate::{process::ProcessInfo, settings};
-
-use crate::runtime::{ProbeState, ProbeStateInspect};
 
 pub struct CPythonProbeState {}
 
 impl ProbeStateInspect for CPythonProbeState {
-    fn inspect_process(process_info: &ProcessInfo) -> Result<ProbeState> {
-        let tasks: procfs::process::TasksIter = match process_info.process_self.tasks() {
-            Ok(ts) => ts,
+    fn inspect_process(process_info: &mut ProcessInfo) -> Result<ProbeState> {
+        search_proc_map(process_info)
+    }
+}
+
+fn search_proc_map(process_info: &ProcessInfo) -> Result<ProbeState> {
+    let maps = procfs::process::Process::new(process_info.pid)?.maps()?;
+    for map in maps.iter() {
+        if let procfs::process::MMapPath::Path(p) = map.pathname.clone() {
+            let s = match p.into_os_string().into_string() {
+                Ok(s) => s,
+                Err(os) => {
+                    warn!("convert osstr to string failed: {:?}", os);
+                    continue;
+                }
+            };
+            if s.contains("python_loader") {
+                return Ok(ProbeState::Attached);
+            }
+        }
+    }
+    Ok(ProbeState::NotAttach)
+}
+
+pub struct CPythonProbe {}
+
+impl ProbeCopy for CPythonProbe {
+    fn names() -> (Vec<String>, Vec<String>) {
+        (
+            [settings::RASP_PYTHON_LOADER()].to_vec(),
+            [settings::RASP_PYTHON_DIR()].to_vec(),
+        )
+    }
+}
+
+pub struct CPythonRuntime {}
+
+impl CPythonRuntime {
+    pub fn python_inspect(process_info: &ProcessInfo) -> Option<String> {
+        match Self::libpython_inspect(process_info) {
+            Ok(s) => {
+                if s.is_some() {
+                    return s;
+                }
+            }
             Err(e) => {
-                return Err(anyhow!(e));
+                warn!("inspect libpython failed: {}", e)
             }
-        };
-        for task_result in tasks {
-            if let Err(_e) = task_result {
-                continue;
+        }
+        match Self::symbol_inspect(&process_info) {
+            Ok(s) => {
+                if s.is_some() {
+                    return s;
+                }
             }
-            if let Ok(task) = task_result {
-                let task_stat_result = task.stat();
-                if let Ok(task_stat) = task_stat_result {
-                    if task_stat.comm == "python-client" {
-                        return Ok(ProbeState::Attached);
+            Err(e) => {
+                warn!("inspect python symbol failed: {}", e)
+            }
+        }
+        None
+    }
+    pub fn libpython_inspect(process_info: &ProcessInfo) -> Result<Option<String>> {
+        let maps = procfs::process::Process::new(process_info.pid)?.maps()?;
+        let regex_str = r"libpython(\d\.\d+)[m]?\.so";
+        let regex = Regex::new(regex_str)?;
+        for map in maps.iter() {
+            if let procfs::process::MMapPath::Path(p) = map.pathname.clone() {
+                let s = match p.into_os_string().into_string() {
+                    Ok(s) => s,
+                    Err(os) => {
+                        warn!("convert osstr to string failed: {:?}", os);
+                        continue;
                     }
+                };
+                match regex.captures(&s) {
+                    Some(c) => {
+                        if let Some(version) = c.get(1) {
+                            return Ok(Some(String::from(version.as_str())));
+                        }
+                    }
+                    None => continue,
                 }
             }
         }
-        Ok(ProbeState::NotAttach)
+        Ok(None)
     }
-}
-pub fn python_attach(pid: i32) -> Result<bool> {
-    debug!("python attach: {}", pid);
-    let entry = "/etc/elkeid/plugin/RASP/rasp/python/entry.py";
-    // pangolin inject
-    pangolin_inject_file(pid, entry)
+    pub fn symbol_inspect(process_info: &ProcessInfo) -> Result<Option<String>> {
+        let pid = process_info.pid.clone();
+        let exe_path = process_info.exe_path.clone().unwrap();
+        // /proc/<pid>/<exe_path> for process in container
+        let mut path = PathBuf::from(format!("/proc/{}/root/", pid));
+        let exe_path_buf = PathBuf::from(exe_path);
+        if !exe_path_buf.has_root() {
+            path.push(exe_path_buf);
+        } else {
+            for p in exe_path_buf.iter() {
+                if p == std::ffi::OsString::from("/") {
+                    continue;
+                }
+                path.push(p);
+            }
+        }
+        let metadata = fs::metadata(path.clone())?;
+        let size = metadata.len();
+        if size >= (500 * 1024 * 1024) {
+            return Err(anyhow!("bin file oversize: {}", process_info.pid));
+        }
+        let file = File::open(path)?;
+        let bin = unsafe { MmapOptions::new().map(&file)? };
+        let elf = Elf::parse(&bin)?;
+
+        for dynsym in elf.dynsyms.iter() {
+            let name = elf.dynstrtab[dynsym.st_name].to_string();
+            if name == "PyRun_SimpleString" {
+                return Ok(Some("Unknow".to_string()));
+            }
+        }
+        for sym in elf.syms.iter() {
+            let name = elf.strtab[sym.st_name].to_string();
+            if name == "PyRun_SimpleString" {
+                return Ok(Some("Unknow".to_string()));
+            }
+        }
+
+        return Ok(None);
+    }
 }
 
-pub fn pangolin_inject(pid: i32, pyscript: &str) -> Result<bool> {
-    debug!("pangolin inject: {}", pid);
-    // let nsenter = settings::RASP_NS_ENTER_BIN.to_string();
-    let pyinject = "/etc/elkeid/plugin/RASP/rasp/python_inject";
-    let pangolin = "--pangolin=/etc/elkeid/plugin/RASP/rasp/pangolin";
-    let dash_s = "-s";
-    let dash_p = "-p";
-    let pid_string = pid.clone().to_string();
-    /*
-    let nspid = match ProcessInfo::read_ns_pid(pid) {
-    Ok(nspid_option) => {
-        if let Some(nspid) = nspid_option {
-        nspid
-        } else {
-        pid
-        }
-    }
-    Err(e) => {
-        return Err(e);
-    }
-    };
-    let nspid_string = nspid.clone().to_string();
-    */
-    let args = &[pangolin, dash_s, pyscript, dash_p, pid_string.as_str()];
-    return match Command::new(pyinject).args(args).status() {
-        Ok(st) => Ok(st.success()),
-        Err(e) => Err(anyhow!(e.to_string())),
-    };
+pub fn python_attach(pid: i32) -> Result<bool> {
+    debug!("python attach: {}", pid);
+    write_python_entry(pid)?;
+    let entry = settings::RASP_PYTHON_ENTRY();
+    // pangolin inject
+    pangolin_inject_file(pid, entry.as_str())
+}
+
+pub fn write_python_entry(pid: i32) -> Result<()> {
+    let content = format!(
+        r#"import os
+import sys
+
+name = 'rasp'
+path = '{}/__init__.py'
+
+if sys.version_info >= (3, 3):
+    from importlib.machinery import SourceFileLoader
+    SourceFileLoader(name, path).load_module()
+elif sys.version_info >= (2, 7):
+    import imp
+    imp.load_module(name, None, os.path.dirname(path), ('', '', imp.PKG_DIRECTORY))
+
+"#,
+        settings::RASP_PYTHON_DIR()
+    );
+    let path = settings::RASP_PYTHON_ENTRY();
+    let dest_dir = format!("/proc/{}/root{}", pid, path);
+    fs_extra::file::write_all(dest_dir, content.as_str())?;
+    Ok(())
 }
 
 pub fn pangolin_inject_file(pid: i32, file_path: &str) -> Result<bool> {
     debug!("pangolin inject: {}", pid);
-    // let nsenter = settings::RASP_NS_ENTER_BIN.to_string();
-    let pyinject = "/etc/elkeid/plugin/RASP/rasp/python_inject";
-    let pangolin = "--pangolin=/etc/elkeid/plugin/RASP/rasp/pangolin";
-    let dash_p = "-p";
+    let python_loader = settings::RASP_PYTHON_LOADER();
+    let pangolin = settings::RASP_PANGOLIN();
     let file = "--file";
-    let dash_s = "-s";
+    let extra = "--";
     let pid_string = pid.clone().to_string();
     let args = &[
-        pangolin,
+        pid_string.as_str(),
+        extra,
+        python_loader.as_str(),
         file,
-        dash_s,
         file_path,
-        dash_p,
-        pid_string.as_str(),
     ];
-    return match Command::new(pyinject).args(args).status() {
-        Ok(st) => Ok(st.success()),
+    match run_async_process(Command::new(pangolin).args(args)) {
+        Ok((es, stdout, stderr)) => {
+            if stdout.len() != 0 {
+                info!("return code: {}\n{}", es.to_string(), &stdout);
+            }
+            if stderr.len() != 0 {
+                warn!("return code: {}\n{}", es.to_string(), &stderr);
+            }
+            let es_code = match es.code() {
+                Some(ec) => ec,
+                None => {
+                    return Err(anyhow!("get status code failed: {}", pid));
+                }
+            };
+            if es_code == 0 {
+                Ok(true)
+            } else if es_code == 255 {
+                let msg = format!(
+                    "python attach exit code 255: {} {} {}",
+                    es_code, &stdout, &stderr
+                );
+                error!("pid: {}, {}", pid, msg);
+                Err(anyhow!("{}", msg))
+            } else {
+                let msg = format!(
+                    "python attach exit code {} {} {}",
+                    es_code, &stdout, &stderr
+                );
+                error!("pid: {}, {}", pid, msg);
+                Err(anyhow!("{}", msg))
+            }
+        }
         Err(e) => Err(anyhow!(e.to_string())),
-    };
-}
-pub fn install_rasp_python_package(pid: i32, env: &HashMap<OsString, OsString>) -> Result<bool> {
-    debug!("install rasp python package: {}", pid);
-    // fetch pid's python path
-    let python_process = match Process::new(pid) {
-        Ok(pp) => pp,
-        Err(e) => return Err(anyhow!(e.to_string())),
-    };
-    let venv_path_option = match env.get(&std::ffi::OsString::from("VIRTUAL_ENV")) {
-        Some(osstr) => match osstr.clone().into_string() {
-            Ok(s) => Some(s),
-            Err(_) => None,
-        },
-        None => None,
-    };
-    let exe_path_str = if let Some(venv_path) = venv_path_option {
-        let path = format!("{}/bin/python", venv_path);
-        String::from(path)
-    } else {
-        let exe_path = match python_process.exe() {
-            Ok(ep) => ep,
-            Err(e) => return Err(anyhow!(e.to_string())),
-        };
-        let exe_path_str = match exe_path.to_str() {
-            Some(p) => String::from(p),
-            None => return Err(anyhow!(String::from("Path convert to str failed"))),
-        };
-        exe_path_str
-    };
-    debug!("using python interpreter: {}", exe_path_str.clone());
-    return rasp_python_package_setup_install(pid, exe_path_str.as_str());
-}
-
-pub fn rasp_python_package_setup_install(pid: i32, python_path: &str) -> Result<bool> {
-    let nsenter = settings::RASP_NS_ENTER_BIN.to_string();
-    let pid_string = pid.clone().to_string();
-    let args = &[
-        "-m",
-        "-n",
-        "-p",
-        "-t",
-        pid_string.as_str(),
-        python_path,
-        "-m",
-        "pip",
-        "install",
-        "--ignore-installed",
-        "/etc/elkeid/plugin/RASP/rasp/rasp-1.0.0-py2.py3-none-any.whl",
-    ];
-    return match Command::new(nsenter)
-        .current_dir("/etc/elkeid/plugin/RASP/rasp/")
-        .args(args)
-        .status()
-    {
-        Ok(st) => Ok(st.success()),
-        Err(e) => Err(anyhow!(e.to_string())),
-    };
+    }
 }

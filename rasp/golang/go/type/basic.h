@@ -4,8 +4,6 @@
 #include "preprocess.h"
 #include <string>
 
-#pragma pack(push, 1)
-
 namespace go {
     typedef signed char Int8;
     typedef unsigned char Uint8;
@@ -23,52 +21,90 @@ namespace go {
     typedef float _Complex Complex64;
     typedef double _Complex Complex128;
 
-    enum endian {
-        emLittleEndian,
-        emBigEndian
+    struct Interface {
+        void *tab;
+        void *data;
     };
 
-    struct interface {
-        void *t;
-        void *v;
+    METADATA(Interface, void *, void *)
+
+    struct EmptyInterface {
+        void *type;
+        void *data;
     };
 
-    METADATA(interface, void *, void *)
+    METADATA(EmptyInterface, void *, void *)
 
-    struct string {
+    struct String {
         const char *data;
         ptrdiff_t length;
 
-        bool empty() const {
+        [[nodiscard]] bool empty() const {
             return data == nullptr || length == 0;
         }
 
-        std::string toSTDString() const {
-            return std::string(data, length);
+        [[nodiscard]] std::string string() const {
+            return {data, (size_t) length};
         }
     };
 
-    METADATA(string, const char *, ptrdiff_t)
+    METADATA(String, const char *, ptrdiff_t)
 
     template<typename T>
-    struct slice {
+    struct Slice {
         T *values;
         Int count;
         Int capacity;
 
-        bool empty() const {
+        [[nodiscard]] bool empty() const {
             return count == 0;
         }
 
-        T& operator[](int i) const {
+        [[nodiscard]] T &operator[](int i) const {
             return values[i];
         }
     };
 
     template<typename T>
-    TEMPLATE_METADATA(slice<T>, T *, Int, Int)
-}
+    TEMPLATE_METADATA(Slice<T>, T *, Int, Int)
 
-#pragma pack(pop)
+    template<typename K, typename V>
+    struct Bucket {
+        Uint8 topBits[8];
+        K keys[8];
+        V elems[8];
+        Bucket<K, V> *overflow;
+    };
+
+    template<typename K, typename V>
+    TEMPLATE_METADATA(TEMPLATE_ARG(Bucket<K, V>), Int, K[8], V[8], Bucket<K, V> *)
+
+    template<typename K, typename V>
+    struct Map {
+        Int count;
+        Uint8 flags;
+        Uint8 B;
+        Uint16 overflowNum;
+        Uint32 hash0;
+        Bucket<K, V> *buckets;
+        Bucket<K, V> *oldBuckets;
+        Uintptr evacuateNum;
+        Uintptr extra;
+    };
+
+    template<typename K, typename V>
+    TEMPLATE_METADATA(
+            TEMPLATE_ARG(Map<K, V>),
+            Int,
+            Uint8,
+            Uint8,
+            Uint16,
+            Uint32,
+            Bucket<K, V> *,
+            Uintptr,
+            Uintptr,
+            Uintptr
+    )
+}
 
 #endif //GO_PROBE_BASIC_H

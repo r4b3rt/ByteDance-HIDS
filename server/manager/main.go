@@ -2,13 +2,16 @@ package main
 
 import (
 	"fmt"
+	initialize "github.com/bytedance/Elkeid/server/manager/init"
+	"os"
+	"os/signal"
+	"syscall"
+
 	"github.com/bytedance/Elkeid/server/manager/biz"
 	"github.com/bytedance/Elkeid/server/manager/infra"
 	"github.com/bytedance/Elkeid/server/manager/infra/discovery"
 	"github.com/bytedance/Elkeid/server/manager/infra/ylog"
 	"github.com/gin-gonic/gin"
-	"os/signal"
-	"syscall"
 )
 
 func init() {
@@ -16,6 +19,12 @@ func init() {
 }
 
 func main() {
+	err := initialize.Initialize()
+	if err != nil {
+		fmt.Printf("Initialize Error %s\n", err.Error())
+		os.Exit(-1)
+	}
+
 	//register server
 	reg := discovery.NewServerRegistry()
 	defer reg.Stop()
@@ -33,7 +42,7 @@ func ServerStart() {
 
 	biz.RegisterRouter(router)
 	go func() {
-		fmt.Printf("[START_SERVER] Listening and serving on :%d\n", infra.HttpPort)
+		ylog.Infof("[START_SERVER]", "Listening and serving on :%d", infra.HttpPort)
 		err := router.Run(fmt.Sprintf(":%d", infra.HttpPort))
 		ylog.Errorf("SRV_ERROR", err.Error())
 	}()

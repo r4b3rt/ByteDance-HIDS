@@ -3,10 +3,11 @@ package discovery
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/bytedance/Elkeid/server/manager/infra"
-	"github.com/levigross/grequests"
 	"math/rand"
 	"time"
+
+	"github.com/bytedance/Elkeid/server/manager/infra"
+	"github.com/levigross/grequests"
 )
 
 const (
@@ -37,9 +38,9 @@ func FetchRegistry(name string) ([]string, error) {
 	url := fmt.Sprintf(registryURL, sdHost, name)
 	//fmt.Printf("fetch registry: %s\n", url)
 	//request ds
-	rsp, err := grequests.Get(url, &grequests.RequestOptions{
+	rsp, err := grequests.Get(url, grequests.FromRequestOptions(&grequests.RequestOptions{
 		RequestTimeout: 3 * time.Second,
-	})
+	}))
 	if err != nil {
 		return hosts, err
 	}
@@ -53,6 +54,10 @@ func FetchRegistry(name string) ([]string, error) {
 		hosts = append(hosts, fmt.Sprintf("%s:%d", item.Ip, item.Port))
 	}
 	return hosts, nil
+}
+
+func FetchRegistryWithPort(name string) ([]string, error) {
+	return FetchRegistry(name)
 }
 
 func GetHosts() []string {

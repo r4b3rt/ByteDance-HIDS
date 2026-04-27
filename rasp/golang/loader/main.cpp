@@ -1,22 +1,24 @@
-#include "elf/loader.h"
-#include <common/log.h>
+#include <zero/log.h>
 #include <csignal>
-#include <go/symbol/build_info.h>
-#include <go/symbol/line_table.h>
 #include <go/api/api.h>
+#include <go/symbol/reader.h>
 #include <asm/api_hook.h>
+#include <elf/loader.h>
 
-int main(int argc, char **argv, char **env) {
-    INIT_CONSOLE_LOG(INFO);
+constexpr auto TASK_COMM_LEN = 16;
+constexpr auto LATEST_VERSION = go::Version{1, 20};
+
+int main(int argc, char *argv[], char *envp[]) {
+    INIT_CONSOLE_LOG(zero::INFO_LEVEL);
 
     if (argc < 2) {
         LOG_ERROR("require input file");
         return -1;
     }
 
-    ELFLoader loader;
+    elf_context_t ctx[2] = {};
 
-    if (!loader.load(argv[1]))
+    if (load_elf_file(argv[1], ctx) < 0)
         return -1;
 
     sigset_t mask = {};
@@ -29,54 +31,78 @@ int main(int argc, char **argv, char **env) {
         return -1;
     }
 
-    if (gBuildInfo->load(argv[1], loader.mProgramBase)) {
-        LOG_INFO("go version: %s", gBuildInfo->mVersion.c_str());
-    }
+    std::optional<go::symbol::Reader> reader = go::symbol::openFile(argv[1]);
 
-    if (!gLineTable->load(argv[1], loader.mProgramBase)) {
-        LOG_ERROR("line table load failed");
+    if (!reader) {
+        LOG_ERROR("load golang binary failed");
         return -1;
     }
 
-    if (!gWorkspace->init()) {
-        LOG_ERROR("workspace init failed");
+    std::optional<go::Version> version = reader->version();
+
+    if (!version) {
+        LOG_ERROR("get golang version failed");
         return -1;
     }
 
-    gSmithProbe->start();
+    LOG_INFO("golang version: %d.%d", version->major, version->minor);
 
-    for (unsigned long i = 0; i < gLineTable->mFuncNum; i++) {
-        CFunction func = {};
+    if (*version > LATEST_VERSION) {
+        LOG_ERROR("unsupported golang version");
+        return -1;
+    }
 
-        if (!gLineTable->getFunc(i, func))
-            break;
+    std::optional<go::symbol::InterfaceTable> interfaceTable = reader->interfaces(ctx[0].base);
 
-        const char *name = func.getName();
-        void *entry = func.getEntry();
+    if (interfaceTable) {
+        auto it = std::find_if(interfaceTable->begin(), interfaceTable->end(), [](const auto &interface) {
+            return interface.name() == "*errors.errorString";
+        });
 
-        for (const auto &r : APIRegistry) {
-            if (!r.ignoreCase && strcmp(r.name, name) != 0)
-                continue;
+        if (it != interfaceTable->end()) {
+            *go::errors::ErrorString::errorTab() = (void *) it.operator*().address();
+        }
+    }
 
-            if (r.ignoreCase && CStringHelper::tolower(r.name) != CStringHelper::tolower(name))
-                continue;
+    std::optional<go::symbol::SymbolTable> symbolTable = reader->symbols(go::symbol::FileMapping, ctx[0].base);
 
-            if (*r.metadata.origin != nullptr) {
-                LOG_INFO("ignore %s: %p", name, entry);
-                continue;
-            }
+    if (!symbolTable) {
+        LOG_ERROR("get symbol table failed");
+        return -1;
+    }
 
-            LOG_INFO("hook %s: %p", name, entry);
+    for (const auto &api: GOLANG_API) {
+        for (const auto &symbolEntry: *symbolTable) {
+            go::symbol::Symbol symbol = symbolEntry.symbol();
 
-            if (!gAPIHook->hook(entry, (void *)r.metadata.entry, r.metadata.origin)) {
-                LOG_WARNING("hook %s failed", name);
-                continue;
+            const char *name = symbol.name();
+            void *entry = (void *) symbol.entry();
+
+            if ((api.ignoreCase ? strcasecmp(api.name, name) : strcmp(api.name, name)) == 0) {
+                LOG_INFO("hook %s: %p", name, entry);
+
+                if (hookAPI(entry, (void *) api.metadata.entry, api.metadata.origin) < 0) {
+                    LOG_WARNING("hook %s failed", name);
+                    break;
+                }
+
+                break;
             }
         }
     }
 
+    gTarget->version = *version;
+    gTarget->symbolTable = std::make_unique<go::symbol::SymbolTable>(std::move(*symbolTable));
+
+    std::thread(startProbe).detach();
+
     pthread_sigmask(SIG_SETMASK, &origin_mask, nullptr);
-    loader.jump(argc - 1, argv + 1, env);
+    pthread_setname_np(
+            pthread_self(),
+            std::filesystem::path(argv[1]).filename().string().substr(0, TASK_COMM_LEN - 1).c_str()
+    );
+
+    jump_to_entry(ctx, argc - 1, argv + 1, envp);
 
     return 0;
 }

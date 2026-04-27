@@ -1,11 +1,14 @@
-use std::sync::{Arc, Mutex};
-use std::fmt;
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use lazy_static::lazy_static;
+use log::*;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use log::*;
+use crate::proto::serde_json::Map;
+use serde_json::Value;
+use anyhow::{Result as AnyhowResult, anyhow};
 
 use super::utils::generate_timestamp_f64;
 
@@ -21,10 +24,13 @@ pub struct ProbeData {
     method_id: Option<u32>,
     class_id: Option<u32>,
     stack_trace: Option<Vec<String>>,
+    pub async_stack_trace: Option<Vec<Vec<String>>>,
     pub action: Option<u32>,
     pub config: Option<String>,
     pub jars: Option<Vec<JarData>>,
     pub golang: Option<GolangDepData>,
+    pub request: Option<String>,
+    pub blocked: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -49,7 +55,6 @@ pub struct GolangReplace {
     pub version: Option<String>,
 }
 
-
 impl ProbeData {
     pub fn new_config(config_string: String) -> Self {
         let mut pd = ProbeData::default();
@@ -62,7 +67,7 @@ impl ProbeData {
         pd.action = Some(action);
         pd
     }
-    pub fn to_hashmap(self) -> HashMap::<&'static str, String> {
+    pub fn to_hashmap(self) -> HashMap<&'static str, String> {
         let mut pdhm = HashMap::<&'static str, String>::new();
         if let Some(args) = self.args {
             pdhm.insert("args", serde_json::json!(args).to_string());
@@ -73,15 +78,26 @@ impl ProbeData {
         if let Some(class_id) = self.class_id {
             pdhm.insert("class_id", class_id.to_string());
         }
+        if let Some(async_stack_trace) = self.async_stack_trace {
+            pdhm.insert(
+                "async_stack_trace",
+                serde_json::json!(async_stack_trace).to_string(),
+            );
+        }
+        if let Some(req) = self.request {
+            pdhm.insert("request", serde_json::json!(req).to_string());
+        }
         if let Some(stack_trace) = self.stack_trace {
             pdhm.insert("stack_trace", serde_json::json!(stack_trace).to_string());
         }
         if let Some(jars) = self.jars {
             pdhm.insert("jars", serde_json::json!(jars).to_string());
         }
+        if let Some(blocked) = self.blocked {
+            pdhm.insert("blocked", blocked.to_string());
+        }
         pdhm
     }
-
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -93,21 +109,226 @@ pub struct JarData {
     specification_version: Option<String>,
 }
 
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ProbeConfig {
-    pub config: Option<String>,
-    pub action: Option<u32>,
+    pub pid: i32,
+    pub message_type: i32,
+    pub data: ProbeConfigData,
 }
 
-impl ProbeConfig {
-    fn default() -> Self {
-        ProbeConfig {
-            config: None,
-            action: None,
-        }
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PidMissingProbeConfig {
+    pub message_type: i32,
+    pub data: ProbeConfigData,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ProbeConfigData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<ProbeConfigBlock>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filters: Option<Vec<ProbeConfigFilter>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Vec<ProbeConfigLimit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patches: Option<Vec<ProbeConfigPatch>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_version: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_filter_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<Vec<ProbeConfigClassRule>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub switches: Option<Map<String, Value>>,
+}
+
+impl ProbeConfigData {
+    pub fn empty(message_type: i32) -> AnyhowResult<Self> {
+        /*
+        6FILTER,
+        7BLOCK,
+        8LIMIT,
+        9PATCH
+        12CLASSFILTERSTART
+        13CLASSFILTER
+        14CLASSFILTEREND
+         */
+        let data = match message_type {
+            6 => ProbeConfigData {
+                uuid: Some(String::new()),
+                blocks: None,
+                filters: Some(Vec::new()),
+                limits: None,
+                patches: None,
+                rule_version: None,
+                class_filter_version: None,
+                rule: None,
+                switches: None,
+            },
+            7 => ProbeConfigData {
+                uuid: Some(String::new()),
+                blocks: Some(Vec::new()),
+                filters: None,
+                limits: None,
+                patches: None,
+                rule_version: None,
+                class_filter_version: None,
+                rule: None,
+                switches: None,
+            },
+            8 => ProbeConfigData {
+                uuid: Some(String::new()),
+                blocks: None,
+                filters: None,
+                limits: Some(Vec::new()),
+                patches: None,
+                rule_version: None,
+                class_filter_version: None,
+                rule: None,
+                switches: None,
+            },
+            9 => ProbeConfigData {
+                uuid: Some(String::new()),
+                blocks: None,
+                filters: None,
+                limits: None,
+                patches: None,
+                rule_version: None,
+                class_filter_version: None,
+                rule: None,
+                switches: None,
+            },
+            12 => ProbeConfigData {
+                uuid: None,
+                blocks: None,
+                filters: None,
+                limits: None,
+                patches: None,
+                rule_version: Some(0),
+                class_filter_version: Some(String::new()),
+                rule: None,
+                switches: None,
+            },
+            13 => ProbeConfigData {
+                uuid: None,
+                blocks: None,
+                filters: None,
+                limits: None,
+                patches: None,
+                rule_version: None,
+                class_filter_version: None,
+                rule: Some(Vec::new()),
+                switches: None,
+            },
+            14 => ProbeConfigData {
+                uuid: None,
+                blocks: None,
+                filters: None,
+                limits: None,
+                patches: None,
+                rule_version: None,
+                class_filter_version: None,
+                rule: None,
+                switches: None,
+            },
+            18 => ProbeConfigData {
+                uuid: Some(String::new()),
+                blocks: None,
+                filters: None,
+                limits: None,
+                patches: None,
+                rule_version: None,
+                class_filter_version: None,
+                rule: None,
+                switches: Some(Map::new()),
+            },
+            _ => {
+                return Err(anyhow!("message type not valid"));
+            }
+        };
+        return Ok(data);
     }
 }
+
+// #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+// pub struct ProbeConfigBlocks {
+//     uuid: String,
+//     blocks: Vec<ProbeConfigBlock>
+// }
+//
+// #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+// pub struct ProbeConfigFilters {
+//     uuid: String,
+//     filters: Vec<ProbeConfigFilter>,
+// }
+//
+// #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+// pub struct ProbeConfigLimits {
+//     uuid: String,
+//     limits: Vec<ProbeConfigLimit>,
+// }
+//
+// #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+// pub struct ProbeConfigPatches{
+//     uuid: String,
+//     pub patches: Vec<ProbeConfigPatch>
+// }
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ProbeConfigBlock {
+    pub class_id: i32,
+    pub method_id: i32,
+    pub rules: Vec<ProbeConfigRules>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ProbeConfigRules {
+    pub index: i32,
+    pub regex: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ProbeConfigFilter {
+    pub class_id: i32,
+    pub method_id: i32,
+    pub include: Vec<ProbeConfigRules>,
+    pub exclude: Vec<ProbeConfigRules>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ProbeConfigLimit {
+    pub class_id: i32,
+    pub method_id: i32,
+    pub quota: i32,
+}
+
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ProbeConfigPatch {
+    pub class_name: String,
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sum_hash: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[allow(non_snake_case)]
+pub struct ProbeConfigClassRule {
+    pub virusName: String,
+    pub flags: i32,
+    pub ruleId: i32,
+    pub className: Option<String>,
+    pub classPath: Option<String>,
+    pub interfacesName: Option<String>,
+    pub classLoaderName: Option<String>,
+    pub parentClassName: Option<String>,
+    pub virusSignature: Option<String>,
+}
+
 
 pub fn message_handle(message: &String) -> Result<String, String> {
     // parse message
@@ -131,16 +352,15 @@ pub fn message_handle(message: &String) -> Result<String, String> {
             }
             None => String::new(),
         },
-        5 =>  match jar_report(&message.clone()) {
+        5 => match jar_report(&message.clone()) {
             Ok(_) => String::new(),
-            Err(e) => {
-                return Err(e)
-            }
-        }
+            Err(e) => return Err(e),
+        },
         _ => return Err(String::from("bad message type")),
     };
     Ok(response)
 }
+
 pub fn jar_report(message: &Message) -> Result<String, String> {
     let msg = message.clone();
     let response = serde_json::json!(msg).to_string();
@@ -234,18 +454,18 @@ impl Message {
     pub fn to_json(&self) -> String {
         serde_json::json!(&self).to_string()
     }
-    pub fn to_hashmap(self) -> HashMap::<&'static str, String> {
+    pub fn to_hashmap(self) -> HashMap<&'static str, String> {
         let mut mhm = HashMap::<&'static str, String>::new();
         mhm.insert("pid", self.pid.to_string());
         mhm.insert("runtime", self.runtime);
         mhm.insert("runtime_version", self.runtime_version);
         mhm.insert("message_type", self.message_type.to_string());
         mhm.insert("rasp_timestamp", self.time.to_string());
+        mhm.insert("probe_version", self.probe_version.to_string());
         if let Some(data) = self.data {
             let probe_data_map = data.to_hashmap();
             mhm.extend(probe_data_map);
         }
         mhm
     }
-
 }

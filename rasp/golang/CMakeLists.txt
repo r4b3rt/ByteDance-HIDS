@@ -1,49 +1,47 @@
 cmake_minimum_required(VERSION 3.17)
-project(go_probe)
+project(go-probe)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 
-include_directories(include)
 include_directories(${CMAKE_SOURCE_DIR})
 
 option(STATIC_BUILD "enable static build" OFF)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
 
-set(EVENT__DISABLE_TESTS ON CACHE BOOL "disable event tests")
-set(EVENT__DISABLE_SAMPLES ON CACHE BOOL "disable event samples")
-set(EVENT__DISABLE_OPENSSL ON CACHE BOOL "disable event openssl")
-set(EVENT__DISABLE_BENCHMARK ON CACHE BOOL "disable event benchmark")
+find_package(aio CONFIG REQUIRED)
+find_package(c-runtime CONFIG REQUIRED)
+find_package(elf-loader CONFIG REQUIRED)
+find_package(go-symbol CONFIG REQUIRED)
+find_package(mimalloc CONFIG REQUIRED)
+find_package(tiny-regex-c CONFIG REQUIRED)
+find_package(trap CONFIG REQUIRED)
 
-set(JSON_BuildTests OFF CACHE BOOL "disable json library tests")
+add_library(
+        go_base
+        STATIC
+        asm/api_hook.cpp
+        client/smith_client.cpp
+        client/smith_message.cpp
+        go/type/stringify.cpp
+)
 
-set(ZYDIS_BUILD_TOOLS OFF CACHE BOOL "disable disassembler tools")
-set(ZYDIS_BUILD_EXAMPLES OFF CACHE BOOL "disable disassembler examples")
+target_link_libraries(
+        go_base
+        PUBLIC
+        aio::aio
+        go::go_symbol
+        runtime::c_runtime
+        mimalloc-static
+        regex::tiny-regex-c
+        trap::trap
+)
 
-include(cmake/ELFIO.cmake)
-include(cmake/zydis.cmake)
-include(cmake/json.cmake)
-include(cmake/libevent.cmake)
+add_executable(go_probe main.cpp client/smith_probe.cpp)
+target_link_libraries(go_probe PRIVATE go_base $<$<BOOL:${STATIC_BUILD}>:-static-pie>)
 
-add_subdirectory(sample/go)
-
-add_executable(go_sample sample/main.cpp asm/inline_hook.cpp asm/api_hook.cpp futex/mutex.cpp
-        futex/futex.cpp futex/condition.cpp client/smith_client.cpp client/smith_probe.cpp
-        client/smith_message.cpp go/stack/smith_trace.cpp go/symbol/build_info.cpp
-        go/symbol/line_table.cpp go/symbol/func.cpp go/api/workspace.cpp go/stack/printf/printf.c)
-
-add_executable(go_loader loader/main.cpp asm/inline_hook.cpp asm/api_hook.cpp futex/mutex.cpp
-        futex/futex.cpp futex/condition.cpp client/smith_client.cpp client/smith_probe.cpp
-        client/smith_message.cpp go/stack/smith_trace.cpp go/symbol/build_info.cpp
-        go/symbol/line_table.cpp go/symbol/func.cpp go/api/workspace.cpp go/stack/printf/printf.c
-        loader/elf/loader.cpp)
-
-add_executable(go_probe main.cpp asm/inline_hook.cpp asm/api_hook.cpp futex/mutex.cpp
-        futex/futex.cpp futex/condition.cpp client/smith_client.cpp client/smith_probe.cpp
-        client/smith_message.cpp go/stack/smith_trace.cpp go/symbol/build_info.cpp
-        go/symbol/line_table.cpp go/symbol/func.cpp go/api/workspace.cpp go/stack/printf/printf.c)
-
-target_link_libraries(go_sample elfio Zydis nlohmann_json event_core_static event_pthreads_static ${CMAKE_DL_LIBS})
-target_link_libraries(go_loader elfio Zydis nlohmann_json event_core_static event_pthreads_static $<$<BOOL:${STATIC_BUILD}>:-static-pie>)
-target_link_libraries(go_probe elfio Zydis nlohmann_json event_core_static event_pthreads_static $<$<BOOL:${STATIC_BUILD}>:-static-pie>)
+add_executable(go_loader loader/main.cpp client/smith_probe.cpp)
+target_link_libraries(go_loader PRIVATE go_base elf::elf_loader $<$<BOOL:${STATIC_BUILD}>:-static-pie>)

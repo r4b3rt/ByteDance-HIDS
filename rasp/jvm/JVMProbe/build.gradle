@@ -1,38 +1,55 @@
-import proguard.gradle.ProGuardTask
-
-buildscript {
-    repositories {
-        google()
-    }
-
-    dependencies {
-        classpath 'com.guardsquare:proguard-gradle:7.0.0'
-    }
-}
-
 plugins {
+    id 'java-library'
     id 'com.github.johnrengelman.shadow' version '6.0.0'
-    id 'java'
+    id 'jacoco'
 }
 
-group 'org.example'
+group 'com.security'
 version '1.0-SNAPSHOT'
 
 repositories {
     mavenCentral()
 }
 
+jacoco {
+    toolVersion = "0.8.5"
+}
+
+test {
+    useJUnitPlatform()
+    finalizedBy jacocoTestReport // report is always generated after tests run
+}
+
+jacocoTestReport {
+    dependencies {
+        testImplementation 'org.junit.jupiter:junit-jupiter-engine:5.8.2'
+        testImplementation 'org.mockito:mockito-core:4.11.0'
+    }
+    dependsOn test // tests are required to run before generating the report
+    reports {
+        xml.enabled true
+        csv.enabled false
+        html.destination file("${buildDir}/reports/jacoco")
+    }
+}
+
+
 dependencies {
-    testCompile group: 'junit', name: 'junit', version: '4.12'
-    compile group: 'org.ow2.asm', name: 'asm-tree', version: '8.0.1'
-    compile group: 'org.yaml', name: 'snakeyaml', version: '1.26'
-    compile group: 'io.netty', name: 'netty-all', version: '4.1.51.Final'
-    compile group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: '2.11.2'
-    compile group: 'org.apache.commons', name: 'commons-lang3', version: '3.11'
+    implementation files('lib/nashorn.jar') 
+    testImplementation group: 'junit', name: 'junit', version: '4.13.1'
+    implementation group: 'org.ow2.asm', name: 'asm-tree', version: '9.6'
+    implementation group: 'org.ow2.asm', name: 'asm-commons', version: '9.6'
+    implementation group: 'io.netty', name: 'netty-all', version: '4.1.85.Final'
+    implementation group: 'org.apache.commons', name: 'commons-lang3', version: '3.11'
+    implementation group: 'com.lmax', name: 'disruptor', version: '3.4.4'
+    implementation 'com.google.code.gson:gson:2.8.9'
+    implementation 'com.esotericsoftware.yamlbeans:yamlbeans:1.14'
+    implementation 'org.lz4:lz4-java:1.8.0'
+    api group: 'org.javassist', name: 'javassist', version: '3.29.0-GA'
 }
 
 compileJava {
-    options.compilerArgs.addAll(['--release', '8'])
+    options.release.set(8)
 }
 
 jar {
@@ -48,66 +65,15 @@ jar {
     }
 }
 
-task genDict {
-    outputs.file('build/dict/dict.txt')
-
-    doLast {
-        def r = new Random()
-
-        def start = r.nextInt(1000) + 0x0100
-        def end = start + 0x4000
-
-        def chars = (start..end)
-                .findAll { Character.isValidCodePoint(it) && Character.isJavaIdentifierPart(it) }
-                .collect { String.valueOf(Character.toChars(it)) }
-
-        int max = chars.size()
-
-        def startChars = []
-        def dict = []
-
-        for (int i = 0; i < max; i++) {
-            char c = chars.get(i).charAt(0)
-            if (Character.isJavaIdentifierStart(c)) {
-                startChars << String.valueOf(c)
-            }
-        }
-
-        def startSize = startChars.size()
-
-        Collections.shuffle(chars, r)
-        Collections.shuffle(startChars, r)
-
-        for (int i = 0; i < max; i++) {
-            def m = r.nextInt(startSize - 3)
-            def n = m + 3
-            (m..n).each { j ->
-                dict << (startChars.get(j) + chars.get(i))
-            }
-        }
-
-        def f = outputs.files.getSingleFile()
-
-        f.getParentFile().mkdirs()
-        f.withWriter("UTF-8") {
-            it.write(startChars.join(System.lineSeparator()))
-            it.write(dict.join(System.lineSeparator()))
-        }
-    }
-}
-
 shadowJar {
     relocate 'io.netty', 'rasp.io.netty'
-    relocate 'com.fasterxml.jackson', 'rasp.com.fasterxml.jackson'
+    relocate 'org.objectweb.asm', 'rasp.org.objectweb.asm'
+    relocate 'org.apache.commons', 'rasp.org.apache.commons'
+    relocate 'org.yaml.snakeyaml', 'rasp.org.yaml.snakeyaml'
+    relocate 'com.lmax.disruptor', 'rasp.com.lmax.disruptor'
+    relocate 'com.google','rasp.com.google'
+    relocate 'com.esotericsoftware', 'rasp.com.esotericsoftware'
+    relocate 'javassist', 'rasp.javassist'
+    relocate 'net.jpountz', 'rasp.net.jpountz'
     relocate 'META-INF/native/libnetty', 'META-INF/native/librasp_netty'
-}
-
-task proguard(type: ProGuardTask) {
-    dependsOn 'genDict'
-    configuration 'proguard-rules.pro'
-
-    injars shadowJar
-    outjars 'build/libs/JVMProbe-1.0-SNAPSHOT-pro.jar'
-
-    libraryjars files(configurations.runtimeClasspath.collect())
 }
